@@ -3,9 +3,9 @@ class Student{
   int? _age;
   int? _rollno;
 
- String? get name => _name;
- int? get age => _age;
- int? get rollno => _rollno;
+ String? get name =>this._name;
+ int? get age => this._age;
+ int? get rollno => this._rollno;
 
 
  set name(String value) => _name = value;
