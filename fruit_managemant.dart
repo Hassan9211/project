@@ -14,21 +14,11 @@ class Fruit {
   Fruit(this.id, this.name, this.price, this.quantity);
 
   Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'name': name,
-      'price': price,
-      'quantity': quantity,
-    };
+    return {'id': id, 'name': name, 'price': price, 'quantity': quantity};
   }
 
   static Fruit fromJson(Map<String, dynamic> json) {
-    return Fruit(
-      json['id'],
-      json['name'],
-      json['price'],
-      json['quantity'],
-    );
+    return Fruit(json['id'], json['name'], json['price'], json['quantity']);
   }
 }
 
@@ -37,8 +27,8 @@ class Fruit {
 // ─────────────────────────────────────────────
 
 void main() async {
-  const username = "admin";
-  const pin = "1234";
+  const username = "hassanraza2486@gmail.com";
+  const pin = "88192275";
 
   print("==== Login Required ====");
   stdout.write("Enter username: ");
