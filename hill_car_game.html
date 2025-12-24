@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hill Climb 3D - Realistic View</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background: #222; }
+        #game-ui { position: fixed; width: 100%; top: 0; left: 0; pointer-events: none; z-index: 10; }
+        #accelerate, #brake {
+            position: fixed; bottom: 40px; width: 120px; height: 120px;
+            opacity: 0.7; border: none; border-radius: 60px; font-size: 2em;
+            color: white; pointer-events: auto; cursor: pointer;
+        }
+        #accelerate { left: 40px; background: linear-gradient(145deg, #444 70%, #5be85b 100%); }
+        #brake { right: 40px; background: linear-gradient(145deg, #444 70%, #ff5252 100%); }
+        #reset-btn {
+            position: fixed; top: 20px; right: 20px; padding: 10px 24px; border-radius: 16px;
+            border: none; background: #6ef50d; color: #fff; font-size: 1.4em; pointer-events: auto; cursor: pointer; opacity: 0.9;
+        }
+        #score-board {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(32,32,32,.9); color: #fff; padding: 8px 32px; border-radius: 16px; font-size: 1.3em;
+        }
+        #error-box {
+            display: none; position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            color: #fff; background: #b71c1c; padding: 12px 20px; border-radius: 12px;
+            z-index: 100; font-family: Consolas, monospace; font-size: 1em; max-width: 90vw; white-space: pre-wrap;
+        }
+        @media (max-width: 600px) {
+            #accelerate, #brake { width: 80px; height: 80px; font-size: 1.3em; }
+            #score-board { font-size: 1em; padding: 6px 18px;}
+            #reset-btn { font-size: 1em; padding: 8px 16px;}
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game-canvas"></canvas>
+    <div id="game-ui">
+        <button id="accelerate">⬆️</button>
+        <button id="brake">⏸️</button>
+        <button id="reset-btn">⟲ Reset</button>
+        <div id="score-board">Distance: <span id="score">0.00</span>m</div>
+    </div>
+    <div id="error-box"></div>
+
+    <!-- three.js -->
+    <script src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@r154/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.154.0/examples/js/controls/OrbitControls.min.js"></script>
+    <script>
+    // ===== CONFIG =====
+    const GAME_CONFIG = {
+        hillLength: 300,
+        terrainDetail: 400,
+        hillAmplitude: 12,
+        car: {
+            width: 2,
+            height: 1.1,
+            length: 3,
+            wheelRadius: 0.55,
+            mass: 125,
+            engineForce: 28,
+            brakeForce: 20,
+            gravity: 22,
+            rollingFriction: 0.77,
+            airDrag: 0.15
+        }
+    };
+
+    let camera, scene, renderer, controls;
+    let car, wheels = [];
+    let terrain, terrainGeometry;
+    let animationId;
+    let score = 0;
+    let gameOver = false;
+    let accelerating = false, braking = false;
+
+    function showError(msg) {
+        var errorBox = document.getElementById("error-box");
+        errorBox.style.display = "block";
+        errorBox.textContent = "Error: " + msg;
+    }
+    function hideError() { document.getElementById("error-box").style.display = "none"; }
+
+    window.onerror = function(message, source, lineno, colno, error) {
+        showError((error && error.stack) ? error.stack : message + ' (' + source + ':' + lineno + ':' + colno + ')');
+        return true;
+    };
+
+    // ===== TERRAIN =====
+    function createTerrainMesh() {
+        const length = GAME_CONFIG.hillLength;
+        const detail = GAME_CONFIG.terrainDetail;
+        const amp = GAME_CONFIG.hillAmplitude;
+        terrainGeometry = new THREE.PlaneGeometry(length, 16, detail, 8);
+        for (let i = 0; i <= detail; i++) {
+            const x = (i / detail) * length;
+            const y = Math.sin(x*0.18)*amp + Math.sin(x*0.4)*(amp/2) + Math.cos(x*0.12)*(amp*0.27);
+            for (let j = 0; j < 9; j++) {
+                const idx = j + i*9;
+                terrainGeometry.attributes.position.setY(idx, y - 3.5 + (j*7/8));
+            }
+        }
+        terrainGeometry.computeVertexNormals();
+        const material = new THREE.MeshStandardMaterial({ color:0x4a7c2b, flatShading:true, side:THREE.DoubleSide });
+        const mesh = new THREE.Mesh(terrainGeometry, material);
+        mesh.rotation.x = -Math.PI/2;
+        mesh.position.set(length/2,0,0);
+        mesh.receiveShadow = true;
+        return mesh;
+    }
+
+    function getTerrainHeightAtX(xNorm) {
+        let i = Math.round(Math.max(0, Math.min(1, xNorm)) * GAME_CONFIG.terrainDetail);
+        return terrainGeometry.attributes.position.getY(i*9 + 4);
+    }
+
+    // ===== LIGHTS =====
+    function addLights() {
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+        dirLight.position.set(25, 35, 25);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        scene.add(dirLight);
+        scene.add(new THREE.AmbientLight(0xccccff, 0.4));
+    }
+
+    // ===== CAR =====
+    function createCar() {
+        const cfg = GAME_CONFIG.car;
+        const group = new THREE.Group();
+
+        // Body
+        const body = new THREE.Mesh(new THREE.BoxGeometry(cfg.length,cfg.height,cfg.width),
+            new THREE.MeshStandardMaterial({color:0xd32f2f, metalness:0.2, roughness:0.6}));
+        body.castShadow = true; body.position.y = cfg.wheelRadius + cfg.height/2;
+        group.add(body);
+
+        // Roof
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(cfg.length*0.55, cfg.height*0.5, cfg.width*0.82),
+            new THREE.MeshStandardMaterial({color:0xfffd00, metalness:0.2, roughness:0.8}));
+        roof.castShadow=true; roof.position.set(0,cfg.wheelRadius+cfg.height*0.87,0);
+        group.add(roof);
+
+        // Wheels
+        wheels=[]; function makeWheel(z,x,color){
+            const wheel = new THREE.Mesh(new THREE.CylinderGeometry(cfg.wheelRadius,cfg.wheelRadius,cfg.width/2,18),
+                new THREE.MeshStandardMaterial({color,metalness:0.24,roughness:0.4}));
+            wheel.rotation.z = Math.PI/2; wheel.position.set(x,cfg.wheelRadius,z); wheel.castShadow=true;
+            group.add(wheel); wheels.push(wheel);
+        }
+        makeWheel(cfg.width*0.34, cfg.length*0.36, 0x444444);
+        makeWheel(-cfg.width*0.34, cfg.length*0.36, 0x444444);
+        makeWheel(cfg.width*0.34, -cfg.length*0.36, 0x222222);
+        makeWheel(-cfg.width*0.34, -cfg.length*0.36, 0x222222);
+
+        // Shadow
+        const shadowMesh = new THREE.Mesh(new THREE.CircleGeometry(cfg.length*0.46,16), new THREE.ShadowMaterial({opacity:0.38}));
+        shadowMesh.rotation.x=-Math.PI/2; shadowMesh.position.y=0.04; group.add(shadowMesh);
+
+        group.position.set(2,6,0);
+        return group;
+    }
+
+    let vehicle = { x:2, y:0, vx:0, vy:0, angle:0, angularVelocity:0, airborne:true };
+
+    function resetGame() {
+        vehicle.x=2; vehicle.y=getTerrainHeightAtX(vehicle.x/GAME_CONFIG.hillLength)+1.65;
+        vehicle.vx=0; vehicle.vy=0; vehicle.angle=0; vehicle.angularVelocity=0; vehicle.airborne=true;
+        score=0; gameOver=false;
+        document.getElementById('score').textContent="0.00";
+        car.position.set(vehicle.x, vehicle.y,0); car.rotation.set(0,0,0);
+        renderer.setClearColor(0x5ecfff,1); hideError();
+    }
+
+    function processPhysics(dt){
+        if(gameOver) return;
+        const cfg = GAME_CONFIG.car;
+        const length = GAME_CONFIG.hillLength;
+
+        const wheelbase = cfg.length*0.72;
+        const frontX = vehicle.x + Math.cos(vehicle.angle)*wheelbase/2;
+        const rearX = vehicle.x - Math.cos(vehicle.angle)*wheelbase/2;
+
+        let frontY = getTerrainHeightAtX(Math.max(0, Math.min(1, frontX/length)));
+        let rearY = getTerrainHeightAtX(Math.max(0, Math.min(1, rearX/length)));
+
+        let onFront = (vehicle.y + Math.sin(vehicle.angle)*wheelbase/2 - cfg.wheelRadius) <= frontY + 0.03;
+        let onRear  = (vehicle.y - Math.sin(vehicle.angle)*wheelbase/2 - cfg.wheelRadius) <= rearY + 0.03;
+        let anyOnGround = onFront || onRear;
+
+        let dY = frontY - rearY, dX = frontX - rearX + 0.001;
+        let groundAngle = Math.atan2(dY,dX);
+
+        vehicle.vy -= cfg.gravity*dt;
+        vehicle.vx *= (1-cfg.airDrag*dt);
+
+        let engine=0;
+        if(onRear && accelerating) engine+=cfg.engineForce;
+        if(anyOnGround && braking) engine-=cfg.brakeForce*(vehicle.vx>0?1:-1);
+        if(!anyOnGround) engine*=0.18;
+
+        if(anyOnGround){
+            vehicle.vx*=(1-cfg.rollingFriction*dt);
+            vehicle.angularVelocity*=(1-0.65*dt);
+            let ax=(engine/cfg.mass)*Math.cos(groundAngle);
+            let ay=(engine/cfg.mass)*Math.sin(groundAngle);
+            vehicle.vx+=ax*dt; vehicle.vy+=ay*dt;
+
+            let avgY=(onFront&&onRear)?(frontY+rearY)/2:(onFront?frontY:rearY);
+            vehicle.y=avgY+cfg.wheelRadius;
+            if(vehicle.vy<0) vehicle.vy=0;
+            vehicle.airborne=false;
+            vehicle.angularVelocity+=(-((vehicle.angle-groundAngle)*1.9)-vehicle.angularVelocity*0.75)*dt*2.6;
+            vehicle.angle+=vehicle.angularVelocity*dt;
+            vehicle.angle=Math.max(Math.min(vehicle.angle, Math.PI/3), -Math.PI/3);
+        } else {
+            if(accelerating) vehicle.angularVelocity-=dt*1.7;
+            if(braking) vehicle.angularVelocity+=dt*1.1;
+        }
+
+        vehicle.x+=vehicle.vx*dt;
+        vehicle.y+=vehicle.vy*dt;
+
+        if(vehicle.x<0){ vehicle.x=0; vehicle.vx=0; }
+        if(vehicle.x>GAME_CONFIG.hillLength-1.2){
+            vehicle.x=GAME_CONFIG.hillLength-1.2; gameOver=true;
+            renderer.setClearColor(0xffa200,1);
+            setTimeout(()=>alert('You reached the finish!'),10);
+        }
+        if(vehicle.y<-12 || Math.abs(vehicle.angle)>Math.PI/2){
+            gameOver=true;
+            renderer.setClearColor(0x0f1b1c,1);
+            setTimeout(()=>alert('Game Over! You crashed.'),10);
+        }
+
+        score=Math.max(score, vehicle.x-2);
+        document.getElementById('score').textContent=score.toFixed(2);
+    }
+
+    function updateCarMesh(){
+        const cfg = GAME_CONFIG.car;
+        car.position.set(vehicle.x,vehicle.y,0);
+        car.rotation.set(0,0,vehicle.angle);
+        wheels.forEach(wheel=>{
+            wheel.rotation.x-=vehicle.vx*0.4/(cfg.wheelRadius+0.02);
+        });
+    }
+
+    function animate(){
+        animationId=requestAnimationFrame(animate);
+        try{
+            processPhysics(1/65);
+            let targetX=vehicle.x+Math.cos(vehicle.angle)*5;
+            let targetY=Math.max(vehicle.y+9,getTerrainHeightAtX(targetX/GAME_CONFIG.hillLength)+8);
+            camera.position.x+=(targetX-camera.position.x)*0.06;
+            camera.position.y+=(targetY-camera.position.y)*0.08;
+            camera.position.z=19-Math.abs(vehicle.angle)*6;
+            camera.lookAt(vehicle.x+Math.cos(vehicle.angle)*4, vehicle.y+1.0, 0);
+            controls.target.set(vehicle.x+Math.cos(vehicle.angle)*4, vehicle.y+1.0, 0);
+            updateCarMesh();
+            renderer.render(scene,camera);
+        }catch(e){ showError(e.stack||e.message); cancelAnimationFrame(animationId); }
+    }
+
+    function setupControls(){
+        const accel=document.getElementById('accelerate');
+        const brake=document.getElementById('brake');
+        accel.addEventListener('touchstart',()=>accelerating=true,{passive:true});
+        accel.addEventListener('mousedown',()=>accelerating=true);
+        accel.addEventListener('touchend',()=>accelerating=false,{passive:true});
+        accel.addEventListener('mouseup',()=>accelerating=false);
+        brake.addEventListener('touchstart',()=>braking=true,{passive:true});
+        brake.addEventListener('mousedown',()=>braking=true);
+        brake.addEventListener('touchend',()=>braking=false,{passive:true});
+        brake.addEventListener('mouseup',()=>braking=false);
+        document.getElementById('reset-btn').addEventListener('click',resetGame);
+        document.addEventListener('keydown',e=>{
+            if(e.code==='ArrowUp'||e.code==='KeyW') accelerating=true;
+            if(e.code==='ArrowDown'||e.code==='KeyS') braking=true;
+            if(e.code==='KeyR') resetGame();
+        });
+        document.addEventListener('keyup',e=>{
+            if(e.code==='ArrowUp'||e.code==='KeyW') accelerating=false;
+            if(e.code==='ArrowDown'||e.code==='KeyS') braking=false;
+        });
+    }
+
+    function resizeCanvas(){
+        let w=window.innerWidth, h=window.innerHeight;
+        renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix();
+    }
+
+    window.onload=function(){
+        try{
+            renderer=new THREE.WebGLRenderer({canvas:document.getElementById('game-canvas'),antialias:true});
+            renderer.setClearColor(0x5ecfff,1); renderer.shadowMap.enabled=true;
+            scene=new THREE.Scene();
+            camera=new THREE.PerspectiveCamera(60,window.innerWidth/window.innerHeight,0.1,600);
+            camera.position.set(15,18,25);
+            controls=new THREE.OrbitControls(camera,renderer.domElement);
+            controls.enablePan=false; controls.enableZoom=false;
+            controls.minPolarAngle=1.0; controls.maxPolarAngle=1.3;
+            controls.target.set(10,7.8,0);
+            terrain=createTerrainMesh(); scene.add(terrain);
+            car=createCar(); scene.add(car);
+            addLights();
+
+            let shadowGround=new THREE.Mesh(new THREE.PlaneGeometry(GAME_CONFIG.hillLength+8,60,1,1),
+                new THREE.ShadowMaterial({opacity:0.13}));
+            shadowGround.rotation.x=-Math.PI/2; shadowGround.position.set(GAME_CONFIG.hillLength/2,-0.07,0);
+            shadowGround.receiveShadow=true; scene.add(shadowGround);
+
+            setupControls(); window.addEventListener('resize',resizeCanvas,false);
+            resetGame(); resizeCanvas(); animate();
+        }catch(e){ showError(e.stack||e.message||'Initialization error'); }
+    }
+    </script>
+</body>
+</html>
